@@ -17,7 +17,6 @@ env:
   SBF_TOOLS_VERSION: v1.52
   SOLANA_VERSION: 2.1.22
   ANCHOR_VERSION: 1.2.0
-  SURFPOOL_VERSION: 1.2.1
   RUST_VERSION: 1.89.0
 
 jobs:
@@ -70,13 +69,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # PATH is exported and verified in the same step. `GITHUB_PATH` only affects
+      # *later* steps, so a wrong install location shows up as "command not found"
+      # somewhere downstream rather than here — which is exactly how this failed the
+      # first time. Asserting the binaries exist now means a bad install is reported
+      # where it happened.
       - name: Install the Solana CLI
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          BIN="$HOME/.local/share/solana/install/active_release/bin"
+          test -x "$BIN/solana" || { echo "::error::solana not at $BIN"; ls -la "$BIN" || true; exit 1; }
+          test -x "$BIN/cargo-build-sbf" || { echo "::error::cargo-build-sbf not at $BIN"; ls -la "$BIN"; exit 1; }
+          echo "$BIN" >> "$GITHUB_PATH"
+          "$BIN/solana" --version
 
-      - name: Install platform-tools ${{ env.SBF_TOOLS_VERSION }}
-        run: cargo-build-sbf --tools-version "$SBF_TOOLS_VERSION" --version
+      # No eager platform-tools download step. `scripts/build.sh` passes
+      # --tools-version itself and fetches the toolchain on first use, so a separate
+      # warm-up step only adds a place to get the invocation wrong.
 
       - name: Cache the Anchor CLI
         id: anchor_cache
@@ -94,16 +103,24 @@ jobs:
       # version the CLI's bundled validator refuses to load, with "Detected sbpf_version
       # required by the executable which are not enabled". surfpool is the runtime that
       # matches the compiler, so it is what the suite needs.
+      # Not version-pinned, and that is a known weakness rather than an oversight: the
+      # installer script takes no version argument and always fetches the latest release,
+      # so a pin here would be decorative. The cache key is dated instead, which at least
+      # makes the rolling upgrade visible in the logs when it happens. Worth replacing
+      # with a pinned release tarball once surfpool publishes them.
       - name: Cache surfpool
         id: surfpool_cache
         uses: actions/cache@v4
         with:
           path: ~/.local/bin/surfpool
-          key: surfpool-${{ env.SURFPOOL_VERSION }}-${{ runner.os }}
+          key: surfpool-latest-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: surfpool-latest-${{ runner.os }}-
 
       - name: Install surfpool
         if: steps.surfpool_cache.outputs.cache-hit != 'true'
-        run: curl -sL https://run.surfpool.run/ | bash
+        run: |
+          curl -sL https://run.surfpool.run/ | bash
+          test -x "$HOME/.local/bin/surfpool" || { echo "::error::surfpool not installed"; exit 1; }
 
       - name: Put surfpool on PATH
         run: |
@@ -175,6 +192,10 @@ jobs:
           ANCHOR_WALLET: /home/runner/.config/solana/id.json
         run: yarn run ts-mocha -p ./tsconfig.json -t 1000000 'tests/**/*.ts'
 
+      # Tolerant of its own absence: when the job fails *before* surfpool starts, a
+      # failure handler that itself fails adds a second, misleading error to the run and
+      # buries the real one.
       - name: Surfpool log
         if: failure()
-        run: tail -100 surfpool.log
+        run: |
+          if [ -f surfpool.log ]; then tail -100 surfpool.log; else echo "surfpool never started"; fi
