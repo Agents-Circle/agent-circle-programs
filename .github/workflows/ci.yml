@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Every version here is pinned, and the pinning is the point of this file.
+#
+# The toolchain is the single most fragile thing about this repository. The Solana CLI
+# ships platform-tools v1.43, whose bundled rustc (1.79) predates the edition2024
+# stabilisation that several transitive dependencies of anchor-spl now require; v1.52
+# carries rustc 1.89 and compiles the tree cleanly. `scripts/build.sh` documents this at
+# length and defaults to v1.52. Letting CI float would mean a green build locally and a
+# red one here for reasons that look nothing like the change being reviewed.
+env:
+  SBF_TOOLS_VERSION: v1.52
+  SOLANA_VERSION: 2.1.22
+  ANCHOR_VERSION: 1.2.0
+  SURFPOOL_VERSION: 1.2.1
+  RUST_VERSION: 1.89.0
+
+jobs:
+  # Formatting and a production-profile compile. Fast, and it fails before anything
+  # expensive runs.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No `cargo fmt --check` or `yarn lint` gate here, deliberately. Neither passes on
+      # this repository today — `cargo fmt` wants six `msg!` calls rewrapped and prettier
+      # flags both TypeScript files, and both were already true before any of the
+      # Hyperliquid work. Adding a gate the repository fails on day one teaches people to
+      # ignore a red build, which costs more than the formatting is worth. Run
+      # `cargo fmt --all` and `yarn lint:fix` as their own commit, then add the gates.
+
+      # The test job runs `anchor keys sync` against a generated keypair, which rewrites
+      # declare_id and Anchor.toml. That is correct on a disposable checkout and wrong in
+      # a commit, so the committed value is asserted here, in the job that never syncs.
+      - name: Program ID is the committed one
+        env:
+          PROGRAM_ID: 22rFHvivAX4hDwx3NdwfQ1hsyorwDFxc9JLy5WcZV7x6
+        run: |
+          grep -q "declare_id!(\"$PROGRAM_ID\")" programs/agent-registry/src/lib.rs \
+            || (echo "::error::declare_id in lib.rs is not the deployed program ID" && exit 1)
+          test "$(grep -c "$PROGRAM_ID" Anchor.toml)" -eq 2 \
+            || (echo "::error::Anchor.toml does not name the deployed program ID for both clusters" && exit 1)
+
+      # Production defaults: no `localnet` feature, so MIN_TIMELOCK_DELAY is the real
+      # one-hour floor. Anything deployable must compile this way.
+      - name: Compile at production defaults
+        run: cargo check --manifest-path programs/agent-registry/Cargo.toml
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install the Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install platform-tools ${{ env.SBF_TOOLS_VERSION }}
+        run: cargo-build-sbf --tools-version "$SBF_TOOLS_VERSION" --version
+
+      - name: Cache the Anchor CLI
+        id: anchor_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/anchor
+          key: anchor-${{ env.ANCHOR_VERSION }}-${{ runner.os }}
+
+      - name: Install the Anchor CLI
+        if: steps.anchor_cache.outputs.cache-hit != 'true'
+        run: cargo install --git https://github.com/coral-xyz/anchor --tag "v${ANCHOR_VERSION}" anchor-cli --locked
+
+      # Anchor 1.2 spawns surfpool rather than solana-test-validator, and the two are not
+      # interchangeable here: a binary built with platform-tools v1.52 uses an sbpf
+      # version the CLI's bundled validator refuses to load, with "Detected sbpf_version
+      # required by the executable which are not enabled". surfpool is the runtime that
+      # matches the compiler, so it is what the suite needs.
+      - name: Cache surfpool
+        id: surfpool_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/surfpool
+          key: surfpool-${{ env.SURFPOOL_VERSION }}-${{ runner.os }}
+
+      - name: Install surfpool
+        if: steps.surfpool_cache.outputs.cache-hit != 'true'
+        run: curl -sL https://run.surfpool.run/ | bash
+
+      - name: Put surfpool on PATH
+        run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Generate a program keypair
+        # The real program keypair is deliberately not in the repository. CI deploys to a
+        # throwaway validator, so it builds against a generated key and syncs declare_id
+        # to match. `anchor keys sync` edits lib.rs and Anchor.toml — that is fine on a
+        # disposable checkout and must never be committed.
+        run: |
+          solana-keygen new --no-bip39-passphrase --silent --outfile ~/.config/solana/id.json
+          mkdir -p target/deploy
+          solana-keygen new --no-bip39-passphrase --silent --outfile target/deploy/agent_registry-keypair.json
+          anchor keys sync
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      - run: yarn install --frozen-lockfile
+
+      # `yarn test` is build.sh --localnet followed by anchor test --skip-build. The
+      # localnet feature lowers MIN_TIMELOCK_DELAY to two seconds so the *successful*
+      # timelocked-execution path is reachable against a validator, whose clock cannot be
+      # warped. build.sh writes the profile to target/deploy/.build-profile and the fast
+      # path refuses to run against a production binary, which is why the two are
+      # separate commands rather than one.
+      - name: Test
+        run: yarn test
