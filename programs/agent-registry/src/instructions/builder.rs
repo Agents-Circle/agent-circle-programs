@@ -24,13 +24,13 @@ pub struct RegisterBuilder<'info> {
         payer = authority,
         seeds = [BOND_SEED, builder.key().as_ref()],
         bump,
-        token::mint = agent_mint,
+        token::mint = bond_mint,
         token::authority = builder,
     )]
     pub bond_vault: Account<'info, TokenAccount>,
 
-    #[account(address = config.agent_mint)]
-    pub agent_mint: Account<'info, Mint>,
+    #[account(address = config.bond_mint)]
+    pub bond_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub authority: Signer<'info>,

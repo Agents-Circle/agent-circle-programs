@@ -18,12 +18,14 @@ const BOND_SEED = Buffer.from("bond");
 const GOVERNANCE_SEED = Buffer.from("governance");
 const PENDING_SEED = Buffer.from("pending");
 
-// $AGENT is assumed to have 6 decimals for these tests.
+// Bonds are posted in USDC (6 decimals).
 const UNIT = 1_000_000;
+// Roughly 10% of the ceiling each tier unlocks. Below that the bond is theatre: a
+// builder who can defraud $25,000 for a $2,500 stake will.
 const TIER_BONDS: [BN, BN, BN] = [
-  new BN(25_000 * UNIT),
-  new BN(100_000 * UNIT),
-  new BN(400_000 * UNIT),
+  new BN(2_500 * UNIT),
+  new BN(10_000 * UNIT),
+  new BN(40_000 * UNIT),
 ];
 // Quote-token base units (USDC, 6dp): $25k / $150k / $1M
 const TIER_CEILINGS: [BN, BN, BN] = [
@@ -74,7 +76,7 @@ describe("agent-registry", () => {
   const agentBot = Keypair.generate();
   const guardian = Keypair.generate();
 
-  let agentMint: PublicKey;
+  let bondMint: PublicKey;
   let configPda: PublicKey;
   let builderPda: PublicKey;
   let bondVaultPda: PublicKey;
@@ -103,7 +105,7 @@ describe("agent-registry", () => {
       await connection.confirmTransaction(sig);
     }
 
-    agentMint = await createMint(connection, payer, payer.publicKey, null, 6);
+    bondMint = await createMint(connection, payer, payer.publicKey, null, 6);
 
     [configPda] = PublicKey.findProgramAddressSync([CONFIG_SEED], program.programId);
     [builderPda] = PublicKey.findProgramAddressSync(
@@ -117,16 +119,16 @@ describe("agent-registry", () => {
     [governancePda] = PublicKey.findProgramAddressSync([GOVERNANCE_SEED], program.programId);
 
     builderAta = await createAssociatedTokenAccount(
-      connection, payer, agentMint, builderKp.publicKey
+      connection, payer, bondMint, builderKp.publicKey
     );
     traderCompensationAta = await createAssociatedTokenAccount(
-      connection, payer, agentMint, authority.publicKey
+      connection, payer, bondMint, authority.publicKey
     );
     buybackAta = await createAssociatedTokenAccount(
-      connection, payer, agentMint, outsider.publicKey
+      connection, payer, bondMint, outsider.publicKey
     );
 
-    await mintTo(connection, payer, agentMint, builderAta, payer, 600_000 * UNIT);
+    await mintTo(connection, payer, bondMint, builderAta, payer, 600_000 * UNIT);
   });
 
   // ─────────────────────────────── config ───────────────────────────────
@@ -135,12 +137,12 @@ describe("agent-registry", () => {
     it("initialises with tiers and a governance authority", async () => {
       await program.methods
         .initializeConfig(authority.publicKey, TIER_BONDS, TIER_CEILINGS, new BN(TEST_UNBOND_PERIOD))
-        .accounts({ agentMint, payer: payer.publicKey })
+        .accounts({ bondMint, payer: payer.publicKey })
         .rpc();
 
       const cfg = await program.account.config.fetch(configPda);
       assert.equal(cfg.authority.toBase58(), authority.publicKey.toBase58());
-      assert.equal(cfg.agentMint.toBase58(), agentMint.toBase58());
+      assert.equal(cfg.bondMint.toBase58(), bondMint.toBase58());
       assert.equal(cfg.vaultAuthority.toBase58(), PublicKey.default.toBase58());
       assert.equal(cfg.unbondPeriod.toNumber(), TEST_UNBOND_PERIOD);
       assert.equal(cfg.tierBonds[2].toString(), TIER_BONDS[2].toString());
@@ -220,7 +222,7 @@ describe("agent-registry", () => {
     it("registers a builder at tier 0", async () => {
       await program.methods
         .registerBuilder()
-        .accounts({ agentMint, authority: builderKp.publicKey })
+        .accounts({ bondMint, authority: builderKp.publicKey })
         .signers([builderKp])
         .rpc();
 
@@ -327,40 +329,69 @@ describe("agent-registry", () => {
       );
     });
 
-    it("rejects a fee config breaching the guardrails", async () => {
-      await expectError(
+    // Valid launch terms, for the guardrail cases to deviate from one field at a time.
+    // Every bound below must match Constants.sol; check-params.py enforces that.
+    const launchTerms = () => ({
+      listingFeeBps: 0,
+      performanceFeeBps: 1000,
+      builderSplitBps: 8000,
+      executionFeeBps: 2,
+      executionBuilderSplitBps: 5000,
+      positionCapBps: 1200,
+      maxDrawdownBps: 1500,
+      autoPause: true,
+    });
+
+    const expectTermsRejected = (
+      patch: Record<string, number>,
+      error: string
+    ) =>
+      expectError(
         program.methods
-          .approveListing({
-            listingFeeBps: 0,
-            performanceFeeBps: 5000, // 50% — above the 20% cap
-            builderSplitBps: 8000,
-            positionCapBps: 1200,
-            maxDrawdownBps: 1500,
-            autoPause: true,
-          })
+          .approveListing({ ...launchTerms(), ...patch })
           .accountsPartial({ listing: listing0, authority: authority.publicKey })
           .signers([authority])
           .rpc(),
-        "PerformanceFeeTooHigh"
+        error
       );
+
+    it("rejects a performance fee above the 20% cap", async () => {
+      await expectTermsRejected({ performanceFeeBps: 5000 }, "PerformanceFeeTooHigh");
     });
 
     it("rejects a builder split below the 50% floor", async () => {
-      await expectError(
-        program.methods
-          .approveListing({
-            listingFeeBps: 0,
-            performanceFeeBps: 1000,
-            builderSplitBps: 3000,
-            positionCapBps: 1200,
-            maxDrawdownBps: 1500,
-            autoPause: true,
-          })
-          .accountsPartial({ listing: listing0, authority: authority.publicKey })
-          .signers([authority])
-          .rpc(),
-        "BuilderSplitTooLow"
+      await expectTermsRejected({ builderSplitBps: 3000 }, "BuilderSplitTooLow");
+    });
+
+    it("rejects an execution fee above the 10 bps cap", async () => {
+      await expectTermsRejected({ executionFeeBps: 11 }, "ExecutionFeeTooHigh");
+    });
+
+    it("rejects an execution-fee builder split below half", async () => {
+      await expectTermsRejected(
+        { executionBuilderSplitBps: 4999 },
+        "ExecutionBuilderSplitTooLow"
       );
+    });
+
+    // These two were approvable until 2 November 2026: validate() bounded them only
+    // against MAX_BPS, so this program accepted a 100% position cap that the Solidity
+    // implementation rejects. A guardrail in one implementation and not the other is
+    // not a guardrail.
+    it("rejects a position cap above 25%", async () => {
+      await expectTermsRejected({ positionCapBps: 2501 }, "PositionCapOutOfRange");
+    });
+
+    it("rejects a zero position cap", async () => {
+      await expectTermsRejected({ positionCapBps: 0 }, "PositionCapOutOfRange");
+    });
+
+    it("rejects a drawdown limit above 50%", async () => {
+      await expectTermsRejected({ maxDrawdownBps: 5001 }, "DrawdownLimitOutOfRange");
+    });
+
+    it("rejects a zero drawdown limit", async () => {
+      await expectTermsRejected({ maxDrawdownBps: 0 }, "DrawdownLimitOutOfRange");
     });
 
     it("approves with the locked launch defaults when passed null", async () => {
@@ -379,6 +410,17 @@ describe("agent-registry", () => {
       assert.equal(l.maxDrawdownBps, 1500);
       assert.isTrue(l.autoPause);
       assert.isAbove(l.approvedAt.toNumber(), 0);
+
+      // The execution fee lives on its own PDA, created at approval rather than at
+      // submission — so a listing still in vetting has nowhere a fee could be written.
+      const [economics] = PublicKey.findProgramAddressSync(
+        [Buffer.from("economics"), listing0.toBuffer()],
+        program.programId
+      );
+      const e = await program.account.listingEconomics.fetch(economics);
+      assert.equal(e.listing.toBase58(), listing0.toBase58());
+      assert.equal(e.executionFeeBps, 2, "2 bps of notional at launch");
+      assert.equal(e.executionBuilderSplitBps, 5000, "50/50 builder / platform");
     });
 
     it("cannot approve twice", async () => {

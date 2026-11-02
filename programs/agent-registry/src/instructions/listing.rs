@@ -56,11 +56,15 @@ pub fn submit_listing(
     listing.created_at = Clock::get()?.unix_timestamp;
     listing.approved_at = 0;
     listing.bump = ctx.bumps.listing;
-    // Fees stay zeroed until approval writes the real config.
+    // Fees stay zeroed until approval writes the real config. The execution-fee fields
+    // are not zeroed here because they are not on this account: `ListingEconomics` does
+    // not exist until approval, which is the same guarantee by a stronger route.
     listing.apply_fee_config(&FeeConfig {
         listing_fee_bps: 0,
         performance_fee_bps: 0,
         builder_split_bps: 0,
+        execution_fee_bps: 0,
+        execution_builder_split_bps: 0,
         position_cap_bps: 0,
         max_drawdown_bps: 0,
         auto_pause: true,
@@ -94,31 +98,57 @@ pub struct ApproveListing<'info> {
     )]
     pub listing: Account<'info, AgentListing>,
 
+    /// Created here rather than at submission, so a listing still in vetting has no
+    /// economics account and therefore nowhere a fee could be written. `init` rather than
+    /// `init_if_needed`: approval happens once, guarded by the `Vetting` check below.
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + ListingEconomics::INIT_SPACE,
+        seeds = [ECONOMICS_SEED, listing.key().as_ref()],
+        bump
+    )]
+    pub economics: Account<'info, ListingEconomics>,
+
+    #[account(mut)]
     pub authority: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 /// Passing `None` applies the locked launch defaults — 0 bps listing fee,
-/// 1000 bps performance fee, 8000 bps builder split, 1200/1500 risk caps.
-/// Explicit configs are still bounded by the guardrails in `FeeConfig::validate`.
+/// 1000 bps performance fee, 8000 bps builder split, 2 bps execution fee at a 5000 bps
+/// split, 1200/1500 risk caps. Explicit configs are still bounded by the guardrails in
+/// `FeeConfig::validate`.
 pub fn approve_listing(ctx: Context<ApproveListing>, fee_config: Option<FeeConfig>) -> Result<()> {
-    let listing = &mut ctx.accounts.listing;
     require!(
-        listing.status == ListingStatus::Vetting,
+        ctx.accounts.listing.status == ListingStatus::Vetting,
         RegistryError::ListingNotVetting
     );
 
     let cfg = fee_config.unwrap_or_default();
     cfg.validate()?;
 
+    let listing_key = ctx.accounts.listing.key();
+
+    let listing = &mut ctx.accounts.listing;
     listing.apply_fee_config(&cfg);
     listing.status = ListingStatus::Live;
     listing.approved_at = Clock::get()?.unix_timestamp;
 
+    let economics = &mut ctx.accounts.economics;
+    economics.listing = listing_key;
+    economics.execution_fee_bps = cfg.execution_fee_bps;
+    economics.execution_builder_split_bps = cfg.execution_builder_split_bps;
+    economics.bump = ctx.bumps.economics;
+
     msg!(
-        "Listing {} live — perf {} bps, builder split {} bps",
+        "Listing {} live — perf {} bps (builder {} bps), execution {} bps (builder {} bps)",
         listing.index,
         cfg.performance_fee_bps,
-        cfg.builder_split_bps
+        cfg.builder_split_bps,
+        cfg.execution_fee_bps,
+        cfg.execution_builder_split_bps
     );
     Ok(())
 }

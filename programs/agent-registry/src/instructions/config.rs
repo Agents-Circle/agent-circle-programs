@@ -15,7 +15,7 @@ pub struct InitializeConfig<'info> {
     )]
     pub config: Account<'info, Config>,
 
-    pub agent_mint: Account<'info, Mint>,
+    pub bond_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub payer: Signer<'info>,
@@ -34,7 +34,7 @@ pub fn initialize_config(
 ) -> Result<()> {
     let config = &mut ctx.accounts.config;
     config.authority = authority;
-    config.agent_mint = ctx.accounts.agent_mint.key();
+    config.bond_mint = ctx.accounts.bond_mint.key();
     config.vault_authority = Pubkey::default();
     config.tier_bonds = tier_bonds;
     config.tier_ceilings = tier_ceilings;
