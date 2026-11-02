@@ -7,15 +7,24 @@ on:
 
 # Every version here is pinned, and the pinning is the point of this file.
 #
-# The toolchain is the single most fragile thing about this repository. The Solana CLI
-# ships platform-tools v1.43, whose bundled rustc (1.79) predates the edition2024
+# The toolchain is the single most fragile thing about this repository. Older Solana CLI
+# releases ship platform-tools v1.43, whose bundled rustc (1.79) predates the edition2024
 # stabilisation that several transitive dependencies of anchor-spl now require; v1.52
 # carries rustc 1.89 and compiles the tree cleanly. `scripts/build.sh` documents this at
 # length and defaults to v1.52. Letting CI float would mean a green build locally and a
 # red one here for reasons that look nothing like the change being reviewed.
+#
+# SOLANA_VERSION is the version the suite is actually known to pass on, taken from the
+# machine it was verified on — not from the "(2.1.22)" in build.sh's comment, which
+# records the CLI as it was when that script was written. That figure was used here
+# first, and https://release.anza.xyz/v2.1.22/install 404s. The install is
+# `sh -c "$(curl ...)"`, so a 404 feeds sh an empty script and **exits 0**: the step
+# passed and the job failed three steps later with "cargo-build-sbf: command not found".
+# That is why the step now asserts the binaries exist rather than trusting its own
+# exit code.
 env:
   SBF_TOOLS_VERSION: v1.52
-  SOLANA_VERSION: 2.1.22
+  SOLANA_VERSION: 4.2.2
   ANCHOR_VERSION: 1.2.0
   RUST_VERSION: 1.89.0
 
