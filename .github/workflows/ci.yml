@@ -127,11 +127,54 @@ jobs:
 
       - run: yarn install --frozen-lockfile
 
-      # `yarn test` is build.sh --localnet followed by anchor test --skip-build. The
-      # localnet feature lowers MIN_TIMELOCK_DELAY to two seconds so the *successful*
-      # timelocked-execution path is reachable against a validator, whose clock cannot be
-      # warped. build.sh writes the profile to target/deploy/.build-profile and the fast
-      # path refuses to run against a production binary, which is why the two are
-      # separate commands rather than one.
+      # The `--localnet` feature lowers MIN_TIMELOCK_DELAY to two seconds so the
+      # *successful* timelocked-execution path is reachable against a validator, whose
+      # clock cannot be warped. build.sh writes the profile to
+      # target/deploy/.build-profile, and the fast path refuses to run against a
+      # production binary whose one-hour floor would make the governance tests fail in a
+      # way that looks like a code bug.
+      - name: Build (localnet profile)
+        run: ./scripts/build.sh --localnet
+
+      # Started here rather than left to `anchor test`, which is what `yarn test` runs.
+      # Anchor spawns surfpool with its own defaults, and two of those are wrong for a
+      # hermetic suite:
+      #
+      #   - surfpool forks mainnet unless told otherwise, and the suite then fails in its
+      #     before-all hook with "Blockhash not found".
+      #   - inside an Anchor project it interactively prompts for which programs to
+      #     deploy, which outside a terminal dies with "unable to select programs to
+      #     deploy: IO error: not a terminal".
+      #
+      # So: --offline, --no-deploy (we deploy explicitly below) and -y.
+      - name: Start surfpool
+        run: |
+          surfpool start --offline --no-studio --no-tui --no-deploy -y \
+            > surfpool.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if solana --url http://127.0.0.1:8899 cluster-version >/dev/null 2>&1; then
+              echo "surfpool up: $(solana --url http://127.0.0.1:8899 cluster-version)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::surfpool never became ready"
+          tail -30 surfpool.log
+          exit 1
+
+      - name: Fund the provider wallet and deploy
+        run: |
+          solana --url http://127.0.0.1:8899 airdrop 100
+          anchor deploy --provider.cluster localnet
+
+      # ts-mocha directly, since `anchor test` would spawn a second surfpool. That means
+      # setting the two variables anchor would otherwise set for us.
       - name: Test
-        run: yarn test
+        env:
+          ANCHOR_PROVIDER_URL: http://127.0.0.1:8899
+          ANCHOR_WALLET: /home/runner/.config/solana/id.json
+        run: yarn run ts-mocha -p ./tsconfig.json -t 1000000 'tests/**/*.ts'
+
+      - name: Surfpool log
+        if: failure()
+        run: tail -100 surfpool.log

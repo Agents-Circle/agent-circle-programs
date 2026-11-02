@@ -91,16 +91,25 @@ pub struct ApproveListing<'info> {
     )]
     pub config: Account<'info, Config>,
 
+    /// The `Vetting` requirement is an account constraint rather than only a check in the
+    /// handler, and the ordering is load-bearing. Anchor validates accounts in declaration
+    /// order, so this fires before `economics` is initialised. Without it, a second
+    /// approval fails on `init` with a raw "account already in use" from the system
+    /// program — the listing is still protected, but the caller is told the wrong thing,
+    /// and a multisig signer reading that error would have no idea the listing was simply
+    /// already live. The handler keeps its `require!` too: cheap, and it keeps the failure
+    /// legible from the handler alone.
     #[account(
         mut,
         seeds = [AGENT_SEED, listing.builder.as_ref(), &listing.index.to_le_bytes()],
         bump = listing.bump,
+        constraint = listing.status == ListingStatus::Vetting @ RegistryError::ListingNotVetting,
     )]
     pub listing: Account<'info, AgentListing>,
 
     /// Created here rather than at submission, so a listing still in vetting has no
     /// economics account and therefore nowhere a fee could be written. `init` rather than
-    /// `init_if_needed`: approval happens once, guarded by the `Vetting` check below.
+    /// `init_if_needed`: approval happens once, guarded by the constraint above.
     #[account(
         init,
         payer = authority,

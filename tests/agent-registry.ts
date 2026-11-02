@@ -824,8 +824,16 @@ describe("agent-registry", () => {
     });
 
     it("splits a slash 70/30 between harmed traders and the buyback pool", async () => {
-      const amount = new BN(10_000 * UNIT);
+      // 1,000 USDC rather than 10,000. Tier-2 bonds are 10,000 USDC now that bonds are
+      // posted in USDC rather than $AGENT, so the old figure was the entire bond less the
+      // two base units the unbonding tests withdrew, and the slash reverted on
+      // InsufficientBond. Kept well inside the bond so the split is what is under test.
+      const amount = new BN(1_000 * UNIT);
       const bondBefore = (await program.account.builder.fetch(builderPda)).bondAmount;
+      assert.isTrue(
+        bondBefore.gte(amount),
+        `bond ${bondBefore} must cover the slash ${amount} for this test to mean anything`
+      );
 
       await program.methods
         .slashBond(amount, Array(32).fill(42))
@@ -840,8 +848,8 @@ describe("agent-registry", () => {
 
       const traders = await getAccount(connection, traderCompensationAta);
       const buyback = await getAccount(connection, buybackAta);
-      assert.equal(traders.amount.toString(), String(7_000 * UNIT), "70% to harmed traders");
-      assert.equal(buyback.amount.toString(), String(3_000 * UNIT), "30% to buyback");
+      assert.equal(traders.amount.toString(), String(700 * UNIT), "70% to harmed traders");
+      assert.equal(buyback.amount.toString(), String(300 * UNIT), "30% to buyback");
 
       const b = await program.account.builder.fetch(builderPda);
       assert.equal(b.bondAmount.toString(), bondBefore.sub(amount).toString());
