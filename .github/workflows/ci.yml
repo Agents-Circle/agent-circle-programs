@@ -26,7 +26,20 @@ env:
   SBF_TOOLS_VERSION: v1.52
   SOLANA_VERSION: 4.2.2
   ANCHOR_VERSION: 1.2.0
-  RUST_VERSION: 1.89.0
+  # The HOST toolchain, which compiles anchor-cli and the IDL. Deliberately `stable`
+  # rather than pinned, and the distinction from SBF_TOOLS_VERSION is the point:
+  #
+  #   - SBF_TOOLS_VERSION pins what produces the *deployable artifact*. That must be
+  #     reproducible, so it is exact.
+  #   - This compiles tooling only and never touches the program bytecode. Pinning it
+  #     buys no reproducibility and does break: it was 1.89.0, and anchor-cli v1.2.0
+  #     failed with "cargo-platform@0.3.3 requires rustc 1.91" when a transitive
+  #     dependency moved past it. An exact pin here just means that happens again on
+  #     whatever version comes next, with an error that reads like a code problem.
+  #
+  # If a future Rust release breaks the anchor build, pin this to the last good version
+  # as a stopgap and raise it once upstream catches up.
+  RUST_VERSION: stable
 
 jobs:
   # Formatting and a production-profile compile. Fast, and it fails before anything
