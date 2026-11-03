@@ -12,6 +12,8 @@ pub const BOND_SEED: &[u8] = b"bond";
 pub const GOVERNANCE_SEED: &[u8] = b"governance";
 #[constant]
 pub const PENDING_SEED: &[u8] = b"pending";
+#[constant]
+pub const ECONOMICS_SEED: &[u8] = b"economics";
 
 pub const BPS_DENOMINATOR: u64 = 10_000;
 
@@ -51,6 +53,19 @@ pub const DEFAULT_BUILDER_SPLIT_BPS: u16 = 8_000; // 80% builder / 20% platform
 pub const DEFAULT_POSITION_CAP_BPS: u16 = 1_200; // 12%
 pub const DEFAULT_MAX_DRAWDOWN_BPS: u16 = 1_500; // 15%
 
+/// Per-trade fee on notional, split evenly between builder and platform.
+///
+/// Charged on notional that actually traded, never on capital under management, so the
+/// spec's commitment that a management fee is "deliberately absent" still holds — an idle
+/// vault pays nothing however long it sits idle.
+///
+/// It does create an incentive the performance fee does not: a builder earns on turnover
+/// whether or not the turnover made money. The checks on that live off-chain — net-of-fee
+/// ranking, turnover shown on every listing, and an automatic flag when fees exceed gross
+/// profit over thirty days. The ceiling below is the floor under those, not a substitute.
+pub const DEFAULT_EXECUTION_FEE_BPS: u16 = 2; // 0.02% of notional
+pub const DEFAULT_EXECUTION_BUILDER_SPLIT_BPS: u16 = 5_000; // 50 / 50
+
 /// Slashed bonds split 70% to harmed traders, 30% to the buyback pool. Never
 /// 100% to treasury — that would create an incentive to slash.
 pub const SLASH_TRADER_BPS: u64 = 7_000;
@@ -60,5 +75,25 @@ pub const MAX_LISTING_FEE_BPS: u16 = 500; // 5%
 pub const MAX_PERFORMANCE_FEE_BPS: u16 = 2_000; // 20%
 pub const MIN_BUILDER_SPLIT_BPS: u16 = 5_000; // builder never drops below 50%
 pub const MAX_BPS: u16 = 10_000;
+
+/// Five times the launch value, and deliberately low in absolute terms: at 10 bps an
+/// agent turning the vault over daily would cost a trader ~36% a year, the point at which
+/// the fee stops being a cost of doing business and becomes the business. Governance can
+/// tune within this; it cannot make churn profitable.
+pub const MAX_EXECUTION_FEE_BPS: u16 = 10;
+
+/// Equal to the default, so the builder's half of the execution fee is a floor rather
+/// than a starting point. Governance may raise the builder's share and never cut it.
+pub const MIN_EXECUTION_BUILDER_SPLIT_BPS: u16 = 5_000;
+
+/// These two were missing until 2 November 2026, and their absence was a live parity
+/// hole rather than an oversight to tidy. `FeeConfig::validate` bounded the position cap
+/// and the drawdown limit only against `MAX_BPS`, so this program would have approved a
+/// listing with a 100% position cap and a 100% drawdown limit that the Solidity
+/// implementation rejects outright. A guardrail present in one implementation and absent
+/// in the other is not a guardrail. `script/check-params.py` in `agent-circle-evm` now
+/// fails the build on exactly this.
+pub const MAX_POSITION_CAP_BPS: u16 = 2_500; // 25%
+pub const MAX_DRAWDOWN_BPS_CEILING: u16 = 5_000; // 50%
 
 pub const TIER_COUNT: usize = 3;

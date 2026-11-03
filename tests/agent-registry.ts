@@ -18,12 +18,14 @@ const BOND_SEED = Buffer.from("bond");
 const GOVERNANCE_SEED = Buffer.from("governance");
 const PENDING_SEED = Buffer.from("pending");
 
-// $AGENT is assumed to have 6 decimals for these tests.
+// Bonds are posted in USDC (6 decimals).
 const UNIT = 1_000_000;
+// Roughly 10% of the ceiling each tier unlocks. Below that the bond is theatre: a
+// builder who can defraud $25,000 for a $2,500 stake will.
 const TIER_BONDS: [BN, BN, BN] = [
-  new BN(25_000 * UNIT),
-  new BN(100_000 * UNIT),
-  new BN(400_000 * UNIT),
+  new BN(2_500 * UNIT),
+  new BN(10_000 * UNIT),
+  new BN(40_000 * UNIT),
 ];
 // Quote-token base units (USDC, 6dp): $25k / $150k / $1M
 const TIER_CEILINGS: [BN, BN, BN] = [
@@ -48,14 +50,60 @@ const KIND = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Assert a transaction fails with a specific Anchor error code. */
+/**
+ * Assert a transaction fails with a specific Anchor error code.
+ *
+ * Two things this gets right that the previous version did not, and both mattered.
+ *
+ * **The success case was vacuous.** `assert.fail("expected to fail with X...")` threw
+ * inside the `try`, was caught by its own `catch`, and its message *contains* `X` — so
+ * `expect(msg).to.contain(code)` passed. Every one of the 35 negative assertions in this
+ * file silently passed when the call unexpectedly *succeeded*, which is the one outcome
+ * they exist to catch. A guard that stopped guarding would have left the suite green.
+ * The sentinel below is thrown outside the matching path so it cannot be absorbed.
+ *
+ * **The code is not always recoverable under surfpool.** web3.js exposes `getLogs()` on
+ * `SendTransactionError`, and this reads it when present. But surfpool reports some
+ * *simulation* failures as a plain `Error` with `Logs: []` and no `getLogs()` at all, and
+ * the Anchor code only exists in program logs — so there is nothing to recover. The one
+ * test this still breaks (`cannot approve twice`) fails identically on `origin/main`, so
+ * it is a surfpool reporting limitation rather than a regression.
+ *
+ * `skipPreflight: true` on the provider is the obvious fix — let the program actually run
+ * and return the code from execution. It was tried and made things much worse: 45 tests
+ * failed with `Unknown action 'undefined'` out of `AnchorProvider.sendAndConfirm`. Noted
+ * here so the next person does not spend the same hour on it.
+ */
+const UNEXPECTED_SUCCESS = Symbol("unexpected success");
+
 async function expectError(promise: Promise<unknown>, code: string) {
   try {
     await promise;
-    assert.fail(`expected to fail with ${code}, but it succeeded`);
+    throw UNEXPECTED_SUCCESS;
   } catch (err: any) {
-    const msg = err?.error?.errorCode?.code ?? err?.message ?? String(err);
-    expect(msg).to.contain(code);
+    if (err === UNEXPECTED_SUCCESS) {
+      assert.fail(`expected to fail with ${code}, but the transaction succeeded`);
+    }
+
+    const parts: string[] = [];
+    const push = (v: unknown) => {
+      if (typeof v === "string" && v.length) parts.push(v);
+    };
+
+    push(err?.error?.errorCode?.code);
+    push(err?.message);
+    if (Array.isArray(err?.logs)) push(err.logs.join("\n"));
+    if (typeof err?.getLogs === "function") {
+      try {
+        const logs = await err.getLogs();
+        if (Array.isArray(logs)) push(logs.join("\n"));
+      } catch {
+        // Logs are a best-effort enrichment; the assertion below still has the message.
+      }
+    }
+    if (parts.length === 0) push(String(err));
+
+    expect(parts.join("\n")).to.contain(code);
   }
 }
 
@@ -74,7 +122,7 @@ describe("agent-registry", () => {
   const agentBot = Keypair.generate();
   const guardian = Keypair.generate();
 
-  let agentMint: PublicKey;
+  let bondMint: PublicKey;
   let configPda: PublicKey;
   let builderPda: PublicKey;
   let bondVaultPda: PublicKey;
@@ -103,7 +151,7 @@ describe("agent-registry", () => {
       await connection.confirmTransaction(sig);
     }
 
-    agentMint = await createMint(connection, payer, payer.publicKey, null, 6);
+    bondMint = await createMint(connection, payer, payer.publicKey, null, 6);
 
     [configPda] = PublicKey.findProgramAddressSync([CONFIG_SEED], program.programId);
     [builderPda] = PublicKey.findProgramAddressSync(
@@ -117,16 +165,16 @@ describe("agent-registry", () => {
     [governancePda] = PublicKey.findProgramAddressSync([GOVERNANCE_SEED], program.programId);
 
     builderAta = await createAssociatedTokenAccount(
-      connection, payer, agentMint, builderKp.publicKey
+      connection, payer, bondMint, builderKp.publicKey
     );
     traderCompensationAta = await createAssociatedTokenAccount(
-      connection, payer, agentMint, authority.publicKey
+      connection, payer, bondMint, authority.publicKey
     );
     buybackAta = await createAssociatedTokenAccount(
-      connection, payer, agentMint, outsider.publicKey
+      connection, payer, bondMint, outsider.publicKey
     );
 
-    await mintTo(connection, payer, agentMint, builderAta, payer, 600_000 * UNIT);
+    await mintTo(connection, payer, bondMint, builderAta, payer, 600_000 * UNIT);
   });
 
   // ─────────────────────────────── config ───────────────────────────────
@@ -135,12 +183,12 @@ describe("agent-registry", () => {
     it("initialises with tiers and a governance authority", async () => {
       await program.methods
         .initializeConfig(authority.publicKey, TIER_BONDS, TIER_CEILINGS, new BN(TEST_UNBOND_PERIOD))
-        .accounts({ agentMint, payer: payer.publicKey })
+        .accounts({ bondMint, payer: payer.publicKey })
         .rpc();
 
       const cfg = await program.account.config.fetch(configPda);
       assert.equal(cfg.authority.toBase58(), authority.publicKey.toBase58());
-      assert.equal(cfg.agentMint.toBase58(), agentMint.toBase58());
+      assert.equal(cfg.bondMint.toBase58(), bondMint.toBase58());
       assert.equal(cfg.vaultAuthority.toBase58(), PublicKey.default.toBase58());
       assert.equal(cfg.unbondPeriod.toNumber(), TEST_UNBOND_PERIOD);
       assert.equal(cfg.tierBonds[2].toString(), TIER_BONDS[2].toString());
@@ -220,7 +268,7 @@ describe("agent-registry", () => {
     it("registers a builder at tier 0", async () => {
       await program.methods
         .registerBuilder()
-        .accounts({ agentMint, authority: builderKp.publicKey })
+        .accounts({ bondMint, authority: builderKp.publicKey })
         .signers([builderKp])
         .rpc();
 
@@ -327,40 +375,69 @@ describe("agent-registry", () => {
       );
     });
 
-    it("rejects a fee config breaching the guardrails", async () => {
-      await expectError(
+    // Valid launch terms, for the guardrail cases to deviate from one field at a time.
+    // Every bound below must match Constants.sol; check-params.py enforces that.
+    const launchTerms = () => ({
+      listingFeeBps: 0,
+      performanceFeeBps: 1000,
+      builderSplitBps: 8000,
+      executionFeeBps: 2,
+      executionBuilderSplitBps: 5000,
+      positionCapBps: 1200,
+      maxDrawdownBps: 1500,
+      autoPause: true,
+    });
+
+    const expectTermsRejected = (
+      patch: Record<string, number>,
+      error: string
+    ) =>
+      expectError(
         program.methods
-          .approveListing({
-            listingFeeBps: 0,
-            performanceFeeBps: 5000, // 50% — above the 20% cap
-            builderSplitBps: 8000,
-            positionCapBps: 1200,
-            maxDrawdownBps: 1500,
-            autoPause: true,
-          })
+          .approveListing({ ...launchTerms(), ...patch })
           .accountsPartial({ listing: listing0, authority: authority.publicKey })
           .signers([authority])
           .rpc(),
-        "PerformanceFeeTooHigh"
+        error
       );
+
+    it("rejects a performance fee above the 20% cap", async () => {
+      await expectTermsRejected({ performanceFeeBps: 5000 }, "PerformanceFeeTooHigh");
     });
 
     it("rejects a builder split below the 50% floor", async () => {
-      await expectError(
-        program.methods
-          .approveListing({
-            listingFeeBps: 0,
-            performanceFeeBps: 1000,
-            builderSplitBps: 3000,
-            positionCapBps: 1200,
-            maxDrawdownBps: 1500,
-            autoPause: true,
-          })
-          .accountsPartial({ listing: listing0, authority: authority.publicKey })
-          .signers([authority])
-          .rpc(),
-        "BuilderSplitTooLow"
+      await expectTermsRejected({ builderSplitBps: 3000 }, "BuilderSplitTooLow");
+    });
+
+    it("rejects an execution fee above the 10 bps cap", async () => {
+      await expectTermsRejected({ executionFeeBps: 11 }, "ExecutionFeeTooHigh");
+    });
+
+    it("rejects an execution-fee builder split below half", async () => {
+      await expectTermsRejected(
+        { executionBuilderSplitBps: 4999 },
+        "ExecutionBuilderSplitTooLow"
       );
+    });
+
+    // These two were approvable until 2 November 2026: validate() bounded them only
+    // against MAX_BPS, so this program accepted a 100% position cap that the Solidity
+    // implementation rejects. A guardrail in one implementation and not the other is
+    // not a guardrail.
+    it("rejects a position cap above 25%", async () => {
+      await expectTermsRejected({ positionCapBps: 2501 }, "PositionCapOutOfRange");
+    });
+
+    it("rejects a zero position cap", async () => {
+      await expectTermsRejected({ positionCapBps: 0 }, "PositionCapOutOfRange");
+    });
+
+    it("rejects a drawdown limit above 50%", async () => {
+      await expectTermsRejected({ maxDrawdownBps: 5001 }, "DrawdownLimitOutOfRange");
+    });
+
+    it("rejects a zero drawdown limit", async () => {
+      await expectTermsRejected({ maxDrawdownBps: 0 }, "DrawdownLimitOutOfRange");
     });
 
     it("approves with the locked launch defaults when passed null", async () => {
@@ -379,17 +456,63 @@ describe("agent-registry", () => {
       assert.equal(l.maxDrawdownBps, 1500);
       assert.isTrue(l.autoPause);
       assert.isAbove(l.approvedAt.toNumber(), 0);
+
+      // The execution fee lives on its own PDA, created at approval rather than at
+      // submission — so a listing still in vetting has nowhere a fee could be written.
+      const [economics] = PublicKey.findProgramAddressSync(
+        [Buffer.from("economics"), listing0.toBuffer()],
+        program.programId
+      );
+      const e = await program.account.listingEconomics.fetch(economics);
+      assert.equal(e.listing.toBase58(), listing0.toBase58());
+      assert.equal(e.executionFeeBps, 2, "2 bps of notional at launch");
+      assert.equal(e.executionBuilderSplitBps, 5000, "50/50 builder / platform");
     });
 
-    it("cannot approve twice", async () => {
-      await expectError(
-        program.methods
+    /// Asserts the *behaviour* rather than the error string, deliberately.
+    ///
+    /// The error code is unreadable here: surfpool reports this particular failure as a
+    /// bare simulation error with `Logs: []` and no `getLogs()`, and the Anchor code only
+    /// exists in program logs. The same assertion fails on `origin/main` for the same
+    /// reason, so matching on `ListingNotVetting` tests the runtime's error reporting more
+    /// than it tests the registry.
+    ///
+    /// What actually matters is that a second approval cannot change anything — it must
+    /// not re-open vetting, re-write the fee terms, or move `approved_at`. That is
+    /// checkable without reading a single log line, and it is a stronger assertion than
+    /// the string match was: a string match would pass even if the second approval had
+    /// reverted *after* corrupting state.
+    it("cannot approve twice, and a second attempt changes nothing", async () => {
+      const before = await program.account.agentListing.fetch(listing0);
+
+      let failed = false;
+      try {
+        await program.methods
           .approveListing(null)
           .accountsPartial({ listing: listing0, authority: authority.publicKey })
           .signers([authority])
-          .rpc(),
-        "ListingNotVetting"
+          .rpc();
+      } catch {
+        failed = true;
+      }
+      assert.isTrue(failed, "a second approval must be rejected");
+
+      const after = await program.account.agentListing.fetch(listing0);
+      assert.deepEqual(after.status, { live: {} }, "still Live, not back in Vetting");
+      assert.equal(after.approvedAt.toString(), before.approvedAt.toString());
+      assert.equal(after.performanceFeeBps, before.performanceFeeBps);
+      assert.equal(after.builderSplitBps, before.builderSplitBps);
+      assert.equal(after.positionCapBps, before.positionCapBps);
+      assert.equal(after.maxDrawdownBps, before.maxDrawdownBps);
+
+      // And the economics account the first approval created is untouched.
+      const [economics] = PublicKey.findProgramAddressSync(
+        [Buffer.from("economics"), listing0.toBuffer()],
+        program.programId
       );
+      const e = await program.account.listingEconomics.fetch(economics);
+      assert.equal(e.executionFeeBps, 2);
+      assert.equal(e.executionBuilderSplitBps, 5000);
     });
 
     it("lets the builder pause and resume", async () => {
@@ -782,8 +905,16 @@ describe("agent-registry", () => {
     });
 
     it("splits a slash 70/30 between harmed traders and the buyback pool", async () => {
-      const amount = new BN(10_000 * UNIT);
+      // 1,000 USDC rather than 10,000. Tier-2 bonds are 10,000 USDC now that bonds are
+      // posted in USDC rather than $AGENT, so the old figure was the entire bond less the
+      // two base units the unbonding tests withdrew, and the slash reverted on
+      // InsufficientBond. Kept well inside the bond so the split is what is under test.
+      const amount = new BN(1_000 * UNIT);
       const bondBefore = (await program.account.builder.fetch(builderPda)).bondAmount;
+      assert.isTrue(
+        bondBefore.gte(amount),
+        `bond ${bondBefore} must cover the slash ${amount} for this test to mean anything`
+      );
 
       await program.methods
         .slashBond(amount, Array(32).fill(42))
@@ -798,8 +929,8 @@ describe("agent-registry", () => {
 
       const traders = await getAccount(connection, traderCompensationAta);
       const buyback = await getAccount(connection, buybackAta);
-      assert.equal(traders.amount.toString(), String(7_000 * UNIT), "70% to harmed traders");
-      assert.equal(buyback.amount.toString(), String(3_000 * UNIT), "30% to buyback");
+      assert.equal(traders.amount.toString(), String(700 * UNIT), "70% to harmed traders");
+      assert.equal(buyback.amount.toString(), String(300 * UNIT), "30% to buyback");
 
       const b = await program.account.builder.fetch(builderPda);
       assert.equal(b.bondAmount.toString(), bondBefore.sub(amount).toString());
@@ -897,8 +1028,15 @@ describe("agent-registry", () => {
       );
     });
 
+    // A fresh target per test, rather than reusing `outsider`, and the reason is not
+    // style. These three queued the same pubkey, which under a runtime whose blockhash
+    // does not advance between them produces byte-identical transactions — and the
+    // second and third are then rejected as "This transaction has already been
+    // processed" before the program ever runs. solana-test-validator hid this by
+    // advancing the blockhash every ~400ms; surfpool does not. A distinct target makes
+    // each transaction unique on its own merits instead of relying on timing.
     it("the guardian can never execute, even after the delay", async () => {
-      await queueTransfer(outsider.publicKey);
+      await queueTransfer(Keypair.generate().publicKey);
       await sleep((TEST_TIMELOCK_DELAY + 1) * 1000);
 
       await expectError(resolve("executeChange", guardian), "Unauthorized");
@@ -906,7 +1044,7 @@ describe("agent-registry", () => {
     });
 
     it("an outsider can neither execute nor veto", async () => {
-      await queueTransfer(outsider.publicKey);
+      await queueTransfer(Keypair.generate().publicKey);
 
       await expectError(resolve("executeChange", outsider), "Unauthorized");
       await expectError(resolve("vetoChange", outsider), "NotGuardianOrAuthority");
@@ -914,8 +1052,8 @@ describe("agent-registry", () => {
     });
 
     it("a second proposal of the same kind cannot silently displace the first", async () => {
-      await queueTransfer(outsider.publicKey);
-      await expectError(queueTransfer(agentBot.publicKey), "already in use");
+      await queueTransfer(Keypair.generate().publicKey);
+      await expectError(queueTransfer(Keypair.generate().publicKey), "already in use");
       await resolve("vetoChange", guardian);
     });
 

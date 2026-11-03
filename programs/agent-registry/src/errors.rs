@@ -18,6 +18,14 @@ pub enum RegistryError {
     PerformanceFeeTooHigh,
     #[msg("Builder split is below the protocol minimum")]
     BuilderSplitTooLow,
+    #[msg("Execution fee exceeds the protocol maximum")]
+    ExecutionFeeTooHigh,
+    #[msg("Execution-fee builder split is below the protocol minimum")]
+    ExecutionBuilderSplitTooLow,
+    #[msg("Position cap must be positive and within the protocol maximum")]
+    PositionCapOutOfRange,
+    #[msg("Drawdown limit must be positive and within the protocol ceiling")]
+    DrawdownLimitOutOfRange,
     #[msg("Basis-point value exceeds 10000")]
     BpsOutOfRange,
 

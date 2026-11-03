@@ -17,6 +17,10 @@ pub struct FeeConfig {
     pub listing_fee_bps: u16,
     pub performance_fee_bps: u16,
     pub builder_split_bps: u16,
+    /// Per-trade fee on notional. Stored on `ListingEconomics`, not `AgentListing` —
+    /// see that account's note for why.
+    pub execution_fee_bps: u16,
+    pub execution_builder_split_bps: u16,
     pub position_cap_bps: u16,
     pub max_drawdown_bps: u16,
     pub auto_pause: bool,
@@ -28,6 +32,8 @@ impl Default for FeeConfig {
             listing_fee_bps: DEFAULT_LISTING_FEE_BPS,
             performance_fee_bps: DEFAULT_PERFORMANCE_FEE_BPS,
             builder_split_bps: DEFAULT_BUILDER_SPLIT_BPS,
+            execution_fee_bps: DEFAULT_EXECUTION_FEE_BPS,
+            execution_builder_split_bps: DEFAULT_EXECUTION_BUILDER_SPLIT_BPS,
             position_cap_bps: DEFAULT_POSITION_CAP_BPS,
             max_drawdown_bps: DEFAULT_MAX_DRAWDOWN_BPS,
             auto_pause: true,
@@ -38,6 +44,12 @@ impl Default for FeeConfig {
 impl FeeConfig {
     /// Guardrails the multisig itself cannot exceed. Even a compromised or
     /// careless authority cannot set a 100% performance fee.
+    ///
+    /// Every bound here must match `Constants.sol` exactly; `check-params.py` in
+    /// `agent-circle-evm` fails the build if it does not. Until 2 November 2026 the
+    /// position cap and drawdown limit were bounded only against `MAX_BPS`, so this
+    /// program would approve a listing the Solidity implementation rejects. That is the
+    /// failure mode the parity check exists for.
     pub fn validate(&self) -> Result<()> {
         require!(
             self.listing_fee_bps <= MAX_LISTING_FEE_BPS,
@@ -52,9 +64,26 @@ impl FeeConfig {
             RegistryError::BuilderSplitTooLow
         );
         require!(
-            self.builder_split_bps <= MAX_BPS
-                && self.position_cap_bps <= MAX_BPS
-                && self.max_drawdown_bps <= MAX_BPS,
+            self.execution_fee_bps <= MAX_EXECUTION_FEE_BPS,
+            RegistryError::ExecutionFeeTooHigh
+        );
+        require!(
+            self.execution_builder_split_bps >= MIN_EXECUTION_BUILDER_SPLIT_BPS,
+            RegistryError::ExecutionBuilderSplitTooLow
+        );
+        // Zero is permitted for the execution fee, unlike the position cap, where zero
+        // would mean a vault that cannot trade at all. A low-turnover agent on no
+        // execution fee is a coherent listing to approve.
+        require!(
+            self.position_cap_bps > 0 && self.position_cap_bps <= MAX_POSITION_CAP_BPS,
+            RegistryError::PositionCapOutOfRange
+        );
+        require!(
+            self.max_drawdown_bps > 0 && self.max_drawdown_bps <= MAX_DRAWDOWN_BPS_CEILING,
+            RegistryError::DrawdownLimitOutOfRange
+        );
+        require!(
+            self.builder_split_bps <= MAX_BPS && self.execution_builder_split_bps <= MAX_BPS,
             RegistryError::BpsOutOfRange
         );
         Ok(())
@@ -66,12 +95,17 @@ impl FeeConfig {
 pub struct Config {
     /// Squads multisig. Approves listings, slashes bonds, revises tiers.
     pub authority: Pubkey,
-    /// $AGENT mint used for bonds.
-    pub agent_mint: Pubkey,
+    /// Mint used for bonds. USDC at launch.
+    ///
+    /// Renamed from `agent_mint` on 2 November 2026. Bonds moved from $AGENT to USDC:
+    /// a bond denominated in a token the platform issues is a bond whose value the
+    /// platform controls, and $AGENT does not exist yet in any case. Same offset, same
+    /// size — no realloc — but the IDL field name changes, so clients must regenerate.
+    pub bond_mint: Pubkey,
     /// PDA of the agent_vault program permitted to report AUM changes.
     /// `Pubkey::default()` until the vault program is deployed.
     pub vault_authority: Pubkey,
-    /// Bond required for tier 1/2/3, in $AGENT base units.
+    /// Bond required for tier 1/2/3, in bond-mint base units (USDC, 6 dp).
     pub tier_bonds: [u64; TIER_COUNT],
     /// Total AUM a builder at tier 1/2/3 may take on, in quote-token base units.
     pub tier_ceilings: [u64; TIER_COUNT],
@@ -244,4 +278,31 @@ impl AgentListing {
         self.max_drawdown_bps = cfg.max_drawdown_bps;
         self.auto_pause = cfg.auto_pause;
     }
+}
+
+/// The execution fee for one listing, held apart from `AgentListing`.
+///
+/// A separate PDA rather than two more fields on the listing, for the same reason
+/// `Governance` is separate from `Config`: `AgentListing` is already live on devnet, and
+/// adding fields grows `INIT_SPACE`, which means a realloc migration across every
+/// existing listing for the sake of four bytes. The precedent is deliberate and recorded
+/// on `Governance` above.
+///
+/// Created at approval time, so a listing in `Vetting` has no economics account at all —
+/// which carries the same guarantee the zeroed fee fields do: a listing that never passes
+/// vetting can never charge anything, because there is nowhere for a fee to be written.
+///
+/// The fee is charged on notional that actually traded. On Hyperliquid that means it is
+/// assessed from observed fills when the vault reconciles, not when an order is placed:
+/// CoreWriter is fire-and-forget, so an order the vault enqueued may never have reached
+/// HyperCore, and billing a trader for an order that never existed would be indefensible.
+/// See `agent-circle-evm/docs/adr/0002-hyperliquid-execution-modes.md`.
+#[account]
+#[derive(InitSpace)]
+pub struct ListingEconomics {
+    /// The listing this belongs to. Checked against the PDA seed rather than trusted.
+    pub listing: Pubkey,
+    pub execution_fee_bps: u16,
+    pub execution_builder_split_bps: u16,
+    pub bump: u8,
 }

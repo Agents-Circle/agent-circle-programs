@@ -28,7 +28,7 @@ pub struct StakeBond<'info> {
 
     #[account(
         mut,
-        constraint = source.mint == config.agent_mint,
+        constraint = source.mint == config.bond_mint,
         constraint = source.owner == authority.key(),
     )]
     pub source: Account<'info, TokenAccount>,
@@ -137,7 +137,7 @@ pub struct WithdrawBond<'info> {
 
     #[account(
         mut,
-        constraint = destination.mint == config.agent_mint,
+        constraint = destination.mint == config.bond_mint,
     )]
     pub destination: Account<'info, TokenAccount>,
 
@@ -232,11 +232,11 @@ pub struct SlashBond<'info> {
     pub bond_vault: Account<'info, TokenAccount>,
 
     /// Receives 70% — compensation for harmed traders.
-    #[account(mut, constraint = trader_compensation.mint == config.agent_mint)]
+    #[account(mut, constraint = trader_compensation.mint == config.bond_mint)]
     pub trader_compensation: Account<'info, TokenAccount>,
 
     /// Receives 30% — the buyback pool.
-    #[account(mut, constraint = buyback.mint == config.agent_mint)]
+    #[account(mut, constraint = buyback.mint == config.bond_mint)]
     pub buyback: Account<'info, TokenAccount>,
 
     pub authority: Signer<'info>,

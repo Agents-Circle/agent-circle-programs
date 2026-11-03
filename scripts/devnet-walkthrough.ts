@@ -233,7 +233,7 @@ async function main() {
         TIER_CEILINGS,
         new BN(DEVNET_UNBOND_PERIOD)
       )
-      .accountsPartial({ agentMint: mint, payer: authority.publicKey })
+      .accountsPartial({ bondMint: mint, payer: authority.publicKey })
       .rpc();
     ok("config created");
     link(sig);
@@ -253,7 +253,7 @@ async function main() {
   } else {
     const sig = await program.methods
       .registerBuilder()
-      .accountsPartial({ agentMint: mint, authority: builderKp.publicKey })
+      .accountsPartial({ bondMint: mint, authority: builderKp.publicKey })
       .signers([builderKp])
       .rpc();
     ok("builder registered (Builder PDA + bond vault created)");

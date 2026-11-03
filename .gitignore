@@ -8,3 +8,6 @@ test-ledger
 
 # devnet walkthrough state — contains a generated builder secret key
 scripts/.devnet-walkthrough.json
+
+# surfpool writes simnet logs here when it runs in the project root
+.surfpool
