@@ -112,6 +112,28 @@ describe("agent-registry", () => {
   anchor.setProvider(provider);
   const program = anchor.workspace.AgentRegistry as Program<AgentRegistry>;
   const connection = provider.connection;
+
+  // surfpool's signatureSubscribe notifications are unreliable: the first confirmation
+  // over the websocket usually lands and later ones time out, on 1.6.1 and 1.7.0 alike.
+  // Every confirmation in this suite — airdrops, spl-token helpers and Anchor's .rpc() —
+  // goes through this connection's confirmTransaction, so it polls signature status
+  // over HTTP instead. A failed transaction still reports its error, so expectError
+  // assertions are unaffected.
+  (connection as unknown as { confirmTransaction: unknown }).confirmTransaction = async (
+    strategy: string | { signature: string }
+  ) => {
+    const signature = typeof strategy === "string" ? strategy : strategy.signature;
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+      const status = value[0];
+      if (status?.confirmationStatus) {
+        return { context: { slot: status.slot }, value: { err: status.err } };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error(`transaction ${signature} was not confirmed within 60s`);
+  };
   const payer = (provider.wallet as anchor.Wallet).payer;
 
   // multisig stand-in
