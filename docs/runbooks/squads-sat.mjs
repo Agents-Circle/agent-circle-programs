@@ -88,7 +88,18 @@ const pk = (name) => new PublicKey(need(name));
 const loadKeypair = (path) =>
   Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(path, "utf8"))));
 
-const connection = new Connection(need("url"), "confirmed");
+// Same monikers as solana-cli's --url, so one URL variable works for both tools.
+const MONIKERS = {
+  devnet: "https://api.devnet.solana.com",
+  d: "https://api.devnet.solana.com",
+  testnet: "https://api.testnet.solana.com",
+  t: "https://api.testnet.solana.com",
+  "mainnet-beta": "https://api.mainnet-beta.solana.com",
+  m: "https://api.mainnet-beta.solana.com",
+  localhost: "http://localhost:8899",
+  l: "http://localhost:8899",
+};
+const connection = new Connection(MONIKERS[need("url")] ?? o.url, "confirmed");
 const vaultIndex = Number(o["vault-index"]);
 
 // Upgradeable-loader account layouts (bincode): Buffer = 1, ProgramData = 3.

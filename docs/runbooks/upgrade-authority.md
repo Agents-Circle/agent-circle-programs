@@ -1,8 +1,9 @@
 # Runbook — moving the upgrade authority to the Squads multisig
 
-**Status:** rehearsed end to end on 2026-11-04 with solana-cli 3.0.0 and the Squads v4 program,
-on a surfpool fork of devnet. The public devnet run is still to do, because the devnet RPC faucet
-is closed (§9). **Not executed** for the real program on any cluster.
+**Status:** run end to end on **public devnet** on 2026-11-04 with solana-cli 3.0.0 and the
+Squads v4 program, using a throwaway test program and a throwaway 2-of-3 multisig (signatures in
+§9). Rehearsed before that on a surfpool fork of devnet. **Not executed** for the real program
+on any cluster.
 **Program:** `agent_registry` at `22rFHvivAX4hDwx3NdwfQ1hsyorwDFxc9JLy5WcZV7x6`
 **Audience:** whoever holds the deploy key today.
 
@@ -107,7 +108,8 @@ wallet. The helper's `approve` command is for devnet rehearsals with throwaway k
 files. The proposals it creates are ordinary Squads vault and config transactions, so they
 should appear in the app. That last point has not been checked; see §9.
 
-Set these once per shell:
+Set these once per shell. `--url` takes the same values for both tools: a moniker
+(`devnet`, `testnet`, `mainnet-beta`, `localhost`) or a full RPC URL.
 
 ```bash
 URL=devnet                      # mainnet-beta in §6
@@ -369,10 +371,32 @@ multisig. Every step in §3 passed:
 
 The signatures exist only on that local fork, so they are not recorded here.
 
-**Devnet: not yet run.** On 2026-11-04 the devnet and testnet RPC faucets answered
-`410 The RPC faucet is closed on this cluster`. Test SOL now comes only from
-faucet.solana.com, which needs a GitHub sign-in. Re-run §3 against `--url devnet` with
-funded throwaway keys and fill in the table below.
+**2026-11-04, public devnet, solana-cli 3.0.0, helper with @sqds/multisig 2.1.4.** Same
+1.2 KB test program (`runbook-noop`), deployed under the throwaway ID
+`9tRUBvzjzyUMVTTt94V6zFUV9jXiFQkxT8hkzTnHjLdg` with a throwaway deploy key
+`GYAPVdaEPjFhz6vVogDCEDFYDKN7Hw9auuoKczfG9ymW`, and a throwaway 2-of-3 multisig
+`7e7jK9BfsQyMkoSHpK1xauhHSZFstimCHF5GDEn9nekU` (vault `DztyTd4DLNGWJ6HMmQsRFvXcbKnzDFupTqoQj3Z1meEo`,
+no config authority, no time lock). The deploy key was funded from faucet.solana.com, because
+the RPC faucets answer `410 The RPC faucet is closed on this cluster`. Every step in §3 passed,
+and every signature below is finalized:
+
+- The one-line transfer failed as shown in §1, with nothing sent.
+- `propose-sat` refused a wrong `--current-authority`.
+- The SAT proposal showed `07000000` with the program-data account, the deploy key and the
+  vault, in that order (3.3).
+- Executing the SAT as a member, without the deploy key, failed signature verification.
+  Executed by the deploy key, `Authority` changed to the vault.
+- The upgrade through the multisig, executed by a voting member, moved `Last Deployed In Slot`
+  from 518686147 to 518686665. The dumped program's sha256 is `e5fb63fe…7088`, which is the
+  v2 build's, not v1's (`7e78bc10…cd64`).
+- A buffer was closed through the vault, and its 0.0071374 SOL rent reached the recipient.
+- The deploy key was removed. The multisig is back to its three members, and the test program
+  stays on the vault.
+
+The whole run cost about 0.02 SOL, plus 0.15 SOL moved to the throwaway members for fees.
+
+Found in this run and fixed: the helper took only a full RPC URL, so `URL=devnet` from §2
+failed before sending anything. It now accepts the CLI's monikers.
 
 **Not verified at all:** the Squads app's SAT and upgrade screens, Squads proposals
 created by the helper appearing in the app, signing with hardware wallets, programs
@@ -380,9 +404,10 @@ larger than the program-data account, and anything on mainnet.
 
 | Date | Cluster | Step | Signature | By |
 |---|---|---|---|---|
-| — | devnet | 3.2 add executor (execute) | *pending* | — |
-| — | devnet | 3.4 SAT (execute) | *pending* | — |
-| — | devnet | 3.5 upgrade (execute) | *pending* | — |
-| — | devnet | 3.6 close buffer (execute) | *pending* | — |
-| — | devnet | 3.7 remove executor (execute) | *pending* | — |
+| 2026-11-04 | devnet | multisig created (rehearsal only) | `W7QseGF3GfC2A7QkCPp35Uf363mwaJMfmAW2ixYVdomjn5cRNHnXBFKCxJhzyUGFB861iu9nSWsz1rAYwUK2TF9` | throwaway deploy key |
+| 2026-11-04 | devnet | 3.2 add executor (execute) | `476CcJDQPvAATYDSrudbXmrvVfJa6ADyDQuBTQNCBJUas3KT1xRfLen3ddjHHeKqFA6MJxBt6Saue63R7zJHUYCT` | a voting member |
+| 2026-11-04 | devnet | 3.4 SAT (execute) | `yZdB21hLThyjNCNJeiSF9H3n8TiDPR5XKA7LbDmJ3qBqVNvkzS1dyN4eiGP6SGyYoH3kJLZZToaMLKoHPNL3Uqy` | deploy key |
+| 2026-11-04 | devnet | 3.5 upgrade (execute) | `4pkCJgdhiAnbPqCkiprNSrNVXQkVqCnqh2K8jJQbMijg3GptyjmDQVRfbcKUSHzXavtAKHdFSoaBKS45Syi8c8qZ` | a voting member |
+| 2026-11-04 | devnet | 3.6 close buffer (execute) | `3ETsDNNXrpPdCHhjvyttRAM6XHnsYKJ89PAWAEaj49xWdZ9ZSA185KwqYShfH2UaHiwgazwoPWLav5JtvCePFuyY` | a voting member |
+| 2026-11-04 | devnet | 3.7 remove executor (execute) | `aTCN5qXXBQ8r9UEg5W2yDiJLCMVXTK8Rat3FSdR9iSJnRCcy5ReuQXHzN7S54YDvS5JvtZfCmYXByu9Hkeprv1a` | a voting member |
 | — | mainnet-beta | 3.4 SAT for `agent_registry` | — | *not yet executed* |
