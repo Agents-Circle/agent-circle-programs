@@ -91,9 +91,7 @@ derived from `Builder.tier` via `Config::ceiling_for_tier` at check time.
 **is** the program's identity and upgrade authority — is not in version control and
 would be destroyed by `anchor clean`.
 
-A backup exists at `~/Documents/agent-registry-PROGRAM-KEYPAIR-BACKUP.json`.
-Move it into a password manager or the team's secret store. Losing it means the
-program can never be upgraded at this address.
+Keep a backup of this keypair in the team's secret store. Losing it means the program can never be upgraded at this address.
 
 ---
 
